@@ -23,7 +23,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { createWriteStream, existsSync } from 'node:fs'
+import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -591,7 +591,10 @@ function forwardSignal(signal) {
 process.on('SIGTERM', () => forwardSignal('SIGTERM'))
 process.on('SIGINT', () => forwardSignal('SIGINT'))
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// The argv path can traverse symlinks (an .app unpacked under /var/folders),
+// while the ESM loader realpaths the module — compare the resolved path or
+// the guard silently never matches and the orchestrator does nothing.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const [appDataDir] = process.argv.slice(2)
   if (appDataDir === undefined || appDataDir === '') {
     process.stderr.write('usage: node boot.mjs <app-data-dir>\n')

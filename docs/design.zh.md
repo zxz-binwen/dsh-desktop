@@ -32,7 +32,7 @@ Web UI 零改动：客户端从 `window.location` 推导全部 HTTP/WebSocket/�
 
 ### 冻结分发
 
-面向直接分发，同一个壳还有第二种形态（`scripts/build.ts --frozen`，先做 macOS）：克隆 harness 并以**完整依赖图**安装构建（它有跨包提升解析的导入，裁剪到生产依赖会破坏运行时解析），把目录树以**解析全部符号链接**的普通文件树形式拷出（Tauri 资源打包会丢弃链接；pnpm 的工作区链接有时是构建机绝对路径），剥离 source map 与构建缓存，与官方 node 二进制（SHA-256 校验）一起冻结进 app 的 `frozen/` 资源。启动时壳检测到 `frozen/` 就用内置 node 拉起编排器（`DSH_FROZEN_ROOT` 指向 `boot.mjs` 所需载荷），后端零 git/pnpm/网络直接启动；splash 的 footer 通过一个 `mode` 事件改写说明。取舍是明确的：冻结包不自更新——发布新 zip 即升级——源码启动器仍是"永远最新"的形态。
+面向直接分发，同一个壳还有第二种形态（`scripts/build.ts --frozen`，先做 macOS）：克隆 harness 并以**完整依赖图**安装构建（它有跨包提升解析的导入，裁剪到生产依赖会破坏运行时解析），拷贝目录树时**保留符号链接并改写为相对路径**（Tauri 资源打包会丢弃链接，故构建后用 rsync 把载荷注入 bundle），剥离 source map 与构建缓存，把 pnpm hoisted 布局重复存储的相同文件**硬链接去重**（约 1.2 GB），与官方 node 二进制（SHA-256 校验）一起冻结。分发格式为 tar.gz——tar 单份存储去重硬链接，zip 会双倍。启动时壳检测到 `frozen/` 就用内置 node 拉起编排器（`DSH_FROZEN_ROOT` 指向 `boot.mjs` 所需载荷），后端零 git/pnpm/网络直接启动；splash 的 footer 通过一个 `mode` 事件改写说明。取舍是明确的：冻结包不自更新——发布新包即升级——源码启动器仍是"永远最新"的形态。
 
 ## 处置
 

@@ -9,15 +9,15 @@
  * `--frozen` (macOS) builds the standalone flavor instead: a prebuilt harness
  * repository and an official node runtime are frozen into the bundle's
  * resources, so the app opens directly with no git, pnpm, or network at
- * startup, and a GitHub-release-ready zip is produced.
+ * startup, and a GitHub-release-ready tar.gz is produced.
  * Design: docs/design.md
  */
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { existsSync, lstatSync } from 'node:fs'
-import { cp, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import { createReadStream, existsSync, lstatSync, statSync } from 'node:fs'
+import { cp, link, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -53,7 +53,7 @@ function usage(): string {
     '  --icon                regenerate src-tauri/icons from the favicon first.',
     '  --frozen              macOS standalone flavor: freeze a prebuilt harness + the node',
     '                        runtime into the bundle (opens directly, never touches git or',
-    '                        the network) and emit a GitHub-release-ready zip.',
+    '                        the network) and emit a GitHub-release-ready tar.gz.',
     '  --node-version <v>    node version bundled by --frozen (default v24.19.0).',
     '  --harness-url <url>   harness repository frozen by --frozen (default deepseek-ai).',
     '  --harness-ref <ref>   harness branch or tag frozen by --frozen (default master).',
@@ -158,7 +158,8 @@ async function generateIcons(): Promise<void> {
 
 /**
  * Collect the bundle outputs `tauri build` produced for this platform and
- * copy each into dist-app/.
+ * copy each into dist-app/. macOS uses ditto so the frozen payload keeps its
+ * symlinks and dedupe hard links (fs.cp would expand both).
  */
 async function collectBundles(): Promise<string[]> {
   await mkdir(outDir, { recursive: true })
@@ -169,7 +170,12 @@ async function collectBundles(): Promise<string[]> {
       const source = join(kindDir, entry)
       const destination = join(outDir, entry)
       await rm(destination, { recursive: true, force: true })
-      await cp(source, destination, { recursive: true })
+      if (process.platform === 'darwin') {
+        const copied = spawnSync('ditto', [source, destination])
+        if (copied.status !== 0) throw new Error(`copying ${source} into dist-app failed: ${String(copied.stderr)}`)
+      } else {
+        await cp(source, destination, { recursive: true })
+      }
       produced.push(destination)
     }
   }
@@ -227,8 +233,14 @@ async function prepareHarnessSource(harnessUrl: string, harnessRef: string, harn
   const dir = join(harnessCache, 'src')
   if (existsSync(join(dir, '.git'))) {
     await runInherit('git', ['remote', 'set-url', 'origin', harnessUrl], 'git remote set-url (harness)', { cwd: dir })
-    await runInherit('git', ['fetch', '--depth', '1', 'origin', harnessRef], 'git fetch (harness)', { cwd: dir })
-    await runInherit('git', ['reset', '--hard', 'FETCH_HEAD'], 'git reset (harness)', { cwd: dir })
+    try {
+      await runInherit('git', ['fetch', '--depth', '1', 'origin', harnessRef], 'git fetch (harness)', { cwd: dir })
+      await runInherit('git', ['reset', '--hard', 'FETCH_HEAD'], 'git reset (harness)', { cwd: dir })
+    } catch (error) {
+      // The cache is a build-time convenience: a transient network failure
+      // keeps the existing checkout instead of blocking the build.
+      console.warn(`build: git fetch of the harness failed (${error instanceof Error ? error.message : String(error)}); continuing with the existing checkout`)
+    }
   } else {
     await rm(dir, { recursive: true, force: true })
     await runInherit('git', ['clone', '--depth', '1', '--branch', harnessRef, harnessUrl, dir], 'git clone (harness)')
@@ -252,23 +264,18 @@ async function buildFrozenHarness(harnessDir: string): Promise<void> {
 }
 
 /**
- * Copy the built harness (minus its git directory) into the frozen payload.
- * Symlinks are kept: they carry pnpm's workspace resolution, which the
- * backend's imports rely on. Dangling links to pruned packages are skipped.
+ * Copy the built harness (minus its git directory, docs site, and OS noise)
+ * into the frozen payload. rsync keeps pnpm's symlinks — fs.cp dereferences
+ * them into full copies — which the backend's workspace resolution relies on.
  */
 async function copyFrozenRepo(source: string): Promise<void> {
   const destination = join(frozenDir, 'repo')
   await rm(destination, { recursive: true, force: true })
-  await cp(source, destination, {
-    recursive: true,
-    filter: (entry) => {
-      if (lstatSync(entry).isSymbolicLink() && !existsSync(entry)) return false
-      const relativePath = entry.slice(source.length)
-      return relativePath !== '/.git' && !relativePath.startsWith('/.git/') && !relativePath.endsWith('/.DS_Store')
-    },
-  })
+  const copied = spawnSync('rsync', ['-a', '--exclude=.git', '--exclude=.DS_Store', '--exclude=/website', `${source}/`, destination])
+  if (copied.status !== 0) throw new Error(`copying the harness checkout failed: ${String(copied.stderr)}`)
   await relativizeSymlinks(source, destination)
   await slimFrozenRepo(destination)
+  await dedupeHardlinks(destination)
 }
 
 /**
@@ -293,12 +300,15 @@ async function slimFrozenRepo(dir: string): Promise<void> {
  * Rewrite absolute symlinks into relative ones. pnpm creates some workspace
  * links as absolute paths into the build checkout; the payload must carry
  * links that resolve inside itself. Absolute links pointing outside the
- * payload tree cannot be shipped and are removed.
+ * payload tree cannot be shipped and are removed, as are dangling links.
  */
 async function relativizeSymlinks(sourceRoot: string, tree: string): Promise<void> {
   for (const link of await collectSymlinks(tree)) {
     const target = await readlink(link)
-    if (!isAbsolute(target)) continue
+    if (!isAbsolute(target)) {
+      if (!existsSync(link)) await rm(link, { force: true })
+      continue
+    }
     if (!target.startsWith(sourceRoot)) {
       await rm(link, { force: true })
       continue
@@ -322,6 +332,64 @@ async function collectSymlinks(dir: string, into: string[] = []): Promise<string
 }
 
 /**
+ * Replace byte-identical files with hard links to one canonical copy. pnpm's
+ * hoisted layout stores every package twice — once under node_modules/.pnpm
+ * and once at its hoisted position — as independent copies; linking them
+ * roughly halves the payload. Files are grouped by size first and only
+ * candidate groups are hashed, so the pass stays cheap. The bundle pipeline
+ * (rsync -aH, ditto, tar) preserves the links end to end.
+ */
+async function dedupeHardlinks(root: string): Promise<void> {
+  const bySize = new Map<number, string[]>()
+  for await (const path of listFiles(root)) {
+    const size = statSync(path).size
+    if (size === 0) continue
+    const group = bySize.get(size)
+    if (group === undefined) {
+      bySize.set(size, [path])
+    } else {
+      group.push(path)
+    }
+  }
+  let saved = 0
+  for (const paths of bySize.values()) {
+    if (paths.length < 2) continue
+    const byHash = new Map<string, string>()
+    for (const path of paths) {
+      const hash = await hashFile(path)
+      const canonical = byHash.get(hash)
+      if (canonical === undefined) {
+        byHash.set(hash, path)
+        continue
+      }
+      if (statSync(path).ino === statSync(canonical).ino) continue
+      saved += statSync(path).size
+      await rm(path)
+      await link(canonical, path)
+    }
+  }
+  console.log(`build: deduplicated ${(saved / 1e9).toFixed(2)} GB of identical files into hard links`)
+}
+
+/** Regular files under `dir`, never following symlinks. */
+async function* listFiles(dir: string): AsyncGenerator<string> {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isFile()) {
+      yield path
+    } else if (entry.isDirectory()) {
+      yield* listFiles(path)
+    }
+  }
+}
+
+async function hashFile(path: string): Promise<string> {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(path)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+/**
  * Download an official node distribution and ship its binary and license as
  * the frozen runtime, verifying the release SHA-256 first. curl carries the
  * download because it honors proxy environments that Node's fetch ignores.
@@ -329,6 +397,17 @@ async function collectSymlinks(dir: string, into: string[] = []): Promise<string
  */
 async function downloadFrozenNode(version: string): Promise<void> {
   const normalized = version.startsWith('v') ? version : `v${version}`
+  const nodeDir = join(frozenDir, 'node')
+  const nodeBinary = join(nodeDir, 'bin', 'node')
+  // Reuse a previously downloaded runtime of the same version: the download
+  // is 30 MB through flaky networks and never changes for a given version.
+  if (existsSync(nodeBinary)) {
+    const installed = spawnSync(nodeBinary, ['--version'], { encoding: 'utf8' })
+    if (installed.status === 0 && installed.stdout.trim() === normalized) {
+      console.log(`build: reusing cached node ${normalized}`)
+      return
+    }
+  }
   const dist = `node-${normalized}-darwin-${process.arch}`
   const base = `https://nodejs.org/dist/${normalized}`
   const download = (url: string, destination: string) => {
@@ -348,7 +427,6 @@ async function downloadFrozenNode(version: string): Promise<void> {
   const actual = createHash('sha256').update(tarball).digest('hex')
   if (actual !== expected) throw new Error(`node ${normalized} checksum mismatch: expected ${expected}, got ${actual}.`)
 
-  const nodeDir = join(frozenDir, 'node')
   await rm(nodeDir, { recursive: true, force: true })
   await mkdir(nodeDir, { recursive: true })
   // Ship only the runtime binary and its license; the dist also carries
@@ -356,7 +434,7 @@ async function downloadFrozenNode(version: string): Promise<void> {
   const extract = spawnSync('tar', ['-xzf', archive, '-C', nodeDir, '--strip-components', '1', `${dist}/bin/node`, `${dist}/LICENSE`])
   await rm(archive, { force: true })
   if (extract.status !== 0) throw new Error(`extracting the node tarball failed: ${String(extract.stderr)}`)
-  if (!existsSync(join(nodeDir, 'bin', 'node'))) throw new Error('the node tarball did not yield bin/node.')
+  if (!existsSync(nodeBinary)) throw new Error('the node tarball did not yield bin/node.')
 }
 
 /**
@@ -369,7 +447,6 @@ async function prepareFrozenPayload(options: {
   harnessDir?: string
   nodeVersion: string
 }): Promise<void> {
-  await rm(frozenDir, { recursive: true, force: true })
   await mkdir(frozenDir, { recursive: true })
   console.log(`build: freezing harness ${options.harnessUrl} @ ${options.harnessRef} with node ${options.nodeVersion}`)
   const { dir, head } = await prepareHarnessSource(options.harnessUrl, options.harnessRef, options.harnessDir)
@@ -391,9 +468,9 @@ async function prepareFrozenPayload(options: {
 /**
  * Copy the frozen repository into the bundled .app after `tauri build`:
  * Tauri's resource packer drops symlinks, so the repository travels outside
- * the resource mechanism and is copied with rsync, which preserves links
- * (already relativized). The bundle is re-signed ad-hoc to cover the added
- * content.
+ * the resource mechanism and is copied with rsync — `-a` preserves the
+ * relativized links, `-H` the dedupe hard links. The bundle is re-signed
+ * ad-hoc to cover the added content.
  */
 async function injectFrozenRepo(): Promise<void> {
   const macosDir = join(bundleRoot, 'macos')
@@ -402,25 +479,27 @@ async function injectFrozenRepo(): Promise<void> {
   const appPath = join(macosDir, app)
   const frozenRoot = join(appPath, 'Contents', 'Resources', 'frozen')
   await mkdir(frozenRoot, { recursive: true })
-  const copied = spawnSync('rsync', ['-a', `${join(frozenDir, 'repo')}/`, join(frozenRoot, 'repo')])
+  const copied = spawnSync('rsync', ['-aH', `${join(frozenDir, 'repo')}/`, join(frozenRoot, 'repo')])
   if (copied.status !== 0) throw new Error(`copying the frozen repo into the bundle failed: ${String(copied.stderr)}`)
   const signed = spawnSync('codesign', ['--force', '--deep', '--sign', '-', appPath])
   if (signed.status !== 0) throw new Error(`re-signing the bundle failed: ${String(signed.stderr)}`)
 }
 
 /**
- * Zip the collected macOS .app for GitHub distribution. ditto preserves
- * symlinks, extended attributes, and the ad-hoc signature.
+ * Pack the collected macOS .app for GitHub distribution. A tar.gz is used
+ * because tar stores deduped hard links once — a zip would embed both copies
+ * and double the archive — and bsdtar (including macOS Archive Utility)
+ * restores both the hard links and the payload's symlinks on extract.
  */
-async function zipAppBundle(): Promise<string> {
+async function packAppBundle(): Promise<string> {
   const apps = (await readdir(outDir)).filter((entry) => entry.endsWith('.app'))
   if (apps.length !== 1) throw new Error(`expected exactly one .app under ${outDir}, found: ${apps.join(', ')}`)
   const version = (JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { version: string }).version
-  const zip = join(outDir, `DeepSeek-Harness-${version}-macos-${process.arch}-standalone.zip`)
-  await rm(zip, { force: true })
-  const zipped = spawnSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', join(outDir, apps[0]!), zip])
-  if (zipped.status !== 0) throw new Error(`zipping the .app failed: ${String(zipped.stderr)}`)
-  return zip
+  const archive = join(outDir, `DeepSeek-Harness-${version}-macos-${process.arch}-standalone.tar.gz`)
+  await rm(archive, { force: true })
+  const packed = spawnSync('tar', ['-czf', archive, apps[0]!], { cwd: outDir })
+  if (packed.status !== 0) throw new Error(`packing the .app failed: ${String(packed.stderr)}`)
+  return archive
 }
 
 async function main(): Promise<void> {
@@ -471,11 +550,11 @@ async function main(): Promise<void> {
   if (produced.length === 0) throw new Error('tauri build produced no bundle artifacts to collect.')
   for (const artifact of produced) console.log(`build: wrote ${artifact}`)
   if (frozen) {
-    const zip = await zipAppBundle()
+    const archive = await packAppBundle()
     const version = (JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { version: string }).version
-    console.log(`build: wrote ${zip}`)
-    console.log(`build: publish with: gh release create v${version} "${zip}" --title "DeepSeek Harness ${version} (macOS standalone)" --draft`)
-    console.log('build: the frozen flavor never syncs from GitHub; ship a new zip to update it.')
+    console.log(`build: wrote ${archive}`)
+    console.log(`build: publish with: gh release create v${version} "${archive}" --title "DeepSeek Harness ${version} (macOS standalone)" --draft`)
+    console.log('build: the frozen flavor never syncs from GitHub; ship a new archive to update it.')
   }
   console.log(`build: ${process.platform === 'win32' ? 'the installer is unsigned; SmartScreen may warn on first run' : 'the bundle is ad-hoc signed; on first launch right-click the app and choose Open'}.`)
   console.log(

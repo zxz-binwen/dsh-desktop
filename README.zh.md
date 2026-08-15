@@ -69,7 +69,7 @@ pnpm run build          # 或：pnpm exec tsx scripts/build.ts --icon
 pnpm run build --frozen       # 可选：--node-version v24.19.0 --harness-ref master
 ```
 
-独立（冻结）包把 harness **和** Node 运行时一起打进安装包：打开即用、不联网、目标机器无需安装任何东西（不需要 git、pnpm、Node）。构建时克隆 harness，安装并构建**完整依赖图**（harness 有跨包提升解析的导入，裁剪到生产依赖会破坏运行时解析），以**解析全部符号链接**的方式拷贝目录树（Tauri 资源打包会丢弃链接），剥离 source map 与构建缓存控制体积，连同官方 node 二进制（SHA-256 校验）冻结进 app 的 `frozen/` 资源。启动时壳检测到 `frozen/` 就用内置 node 直接拉起后端，splash 也会注明。产物：`dist-app/DeepSeek-Harness-<版本>-macos-<架构>-standalone.zip`，可直接附到 GitHub Release（`gh release create ... --draft`）。冻结包不会自更新——升级即发布新的 zip。
+独立（冻结）包把 harness **和** Node 运行时一起打进安装包：打开即用、不联网、目标机器无需安装任何东西（不需要 git、pnpm、Node）。构建时克隆 harness，安装并构建**完整依赖图**（harness 有跨包提升解析的导入，裁剪到生产依赖会破坏运行时解析），拷贝目录树时**保留符号链接**并改写为相对路径（Tauri 资源打包会丢弃链接，故载荷在构建后注入），剥离 source map 与构建缓存，并把 pnpm 布局重复存储的约 1.2 GB 相同文件**硬链接去重**。启动时壳检测到 `frozen/` 就用内置 node 直接拉起后端，splash 也会注明。产物：`dist-app/DeepSeek-Harness-<版本>-macos-<架构>-standalone.tar.gz`（约 400 MB；tar 单份存储去重硬链接——zip 会双倍），可直接附到 GitHub Release（`gh release create ... --draft`）。冻结包不会自更新——升级即发布新的包。
 
 ## 开发
 
