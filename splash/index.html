@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeepSeek Harness</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0e14;
+      --panel: #121722;
+      --text: #e6e8ee;
+      --muted: #8b93a7;
+      --accent: #4f6ef7;
+      --ok: #3ecf8e;
+      --err: #f6685e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.6 ui-sans-serif, -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+    header {
+      padding: 44px 32px 8px;
+      text-align: center;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+    header p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 20px 32px 28px;
+      min-height: 0;
+    }
+    #steps {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .step {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      color: var(--muted);
+    }
+    .step.active { color: var(--text); }
+    .step.done { color: var(--text); }
+    .step .mark { width: 1.2em; text-align: center; flex: none; }
+    .step.active .mark { animation: pulse 1.1s ease-in-out infinite; }
+    .step.error { color: var(--err); }
+    @keyframes pulse { 50% { opacity: 0.35; } }
+    #error {
+      display: none;
+      border: 1px solid var(--err);
+      border-radius: 8px;
+      padding: 12px 14px;
+      background: color-mix(in srgb, var(--err) 10%, transparent);
+      white-space: pre-wrap;
+      user-select: text;
+    }
+    #error .hint { color: var(--muted); margin-top: 6px; font-size: 12px; }
+    #retry {
+      align-self: center;
+      margin-top: 4px;
+      padding: 6px 22px;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #log {
+      flex: 1;
+      min-height: 0;
+      margin: 0;
+      padding: 10px 12px;
+      overflow-y: auto;
+      background: var(--panel);
+      border-radius: 8px;
+      color: var(--muted);
+      font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      user-select: text;
+    }
+    footer {
+      padding: 0 32px 18px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DeepSeek Harness</h1>
+    <p>正在准备最新版本 · Preparing the latest build</p>
+  </header>
+  <main>
+    <div id="steps"></div>
+    <div id="error"><div id="error-message"></div><div class="hint" id="error-hint"></div></div>
+    <button id="retry" hidden>重试 · Retry</button>
+    <pre id="log"></pre>
+  </main>
+  <footer id="footer">启动器会在每次启动时拉取 GitHub 最新代码 · The launcher pulls the latest code from GitHub on every start</footer>
+  <script>
+    const PHASE_LABELS = {
+      clone: '克隆仓库 · Cloning the repository',
+      sync: '拉取最新代码 · Fetching the latest code',
+      install: '安装依赖 · Installing dependencies',
+      build: '构建 · Building',
+      start: '启动服务 · Starting the server',
+    }
+    const MAX_LOG_LINES = 300
+
+    const stepsElement = document.getElementById('steps')
+    const logElement = document.getElementById('log')
+    const errorElement = document.getElementById('error')
+    const errorMessage = document.getElementById('error-message')
+    const errorHint = document.getElementById('error-hint')
+    const retryButton = document.getElementById('retry')
+
+    const logLines = []
+    let activeStep = null
+
+    function appendLog(line) {
+      logLines.push(line)
+      if (logLines.length > MAX_LOG_LINES) logLines.shift()
+      logElement.textContent = logLines.join('\n')
+      logElement.scrollTop = logElement.scrollHeight
+    }
+
+    function markStepError() {
+      if (activeStep === null) return
+      activeStep.classList.remove('active')
+      activeStep.classList.add('error')
+      activeStep.querySelector('.mark').textContent = '✗'
+      activeStep = null
+    }
+
+    function completeStep() {
+      if (activeStep === null) return
+      activeStep.classList.remove('active')
+      activeStep.classList.add('done')
+      activeStep.querySelector('.mark').textContent = '✓'
+      activeStep = null
+    }
+
+    function beginStep(phase) {
+      completeStep()
+      const step = document.createElement('div')
+      step.className = 'step active'
+      const mark = document.createElement('span')
+      mark.className = 'mark'
+      mark.textContent = '•'
+      const label = document.createElement('span')
+      label.textContent = PHASE_LABELS[phase] ?? phase
+      step.append(mark, label)
+      stepsElement.append(step)
+      activeStep = step
+    }
+
+    function showError(message, hint) {
+      markStepError()
+      errorMessage.textContent = message
+      errorHint.textContent = hint ?? ''
+      errorElement.style.display = 'block'
+      retryButton.hidden = false
+    }
+
+    function onBootEvent(payload) {
+      if (typeof payload !== 'object' || payload === null) return
+      switch (payload.type) {
+        case 'phase':
+          beginStep(payload.phase)
+          break
+        case 'log':
+          if (typeof payload.line === 'string') appendLog(payload.line)
+          break
+        case 'notice':
+          appendLog(`⚠ ${payload.message}`)
+          break
+        case 'ready':
+          // The shell navigates this window to the URL; nothing to do here.
+          completeStep()
+          break
+        case 'exited':
+          showError(`服务已退出 · The server exited with code ${payload.code}`, '')
+          retryButton.hidden = false
+          break
+        case 'error':
+          showError(payload.message ?? 'unknown error', payload.hint)
+          break
+        default:
+          break
+      }
+    }
+
+    retryButton.addEventListener('click', () => {
+      retryButton.hidden = true
+      errorElement.style.display = 'none'
+      stepsElement.replaceChildren()
+      logLines.length = 0
+      logElement.textContent = ''
+      const tauri = window.__TAURI__
+      if (tauri !== undefined) tauri.core.invoke('restart_boot')
+    })
+
+    const tauri = window.__TAURI__
+    const footer = document.getElementById('footer')
+    if (tauri !== undefined) {
+      // The shell gates the first boot on this handshake, so no boot event can
+      // fire before the listener exists.
+      tauri.event.listen('boot-event', (event) => onBootEvent(event.payload))
+        .then(() => tauri.core.invoke('splash_ready'))
+        .catch(() => {
+          footer.textContent = '事件通道初始化失败，请重新打开应用 · Event channel failed; reopen the app'
+        })
+    } else {
+      footer.textContent = '浏览器预览模式：无壳事件 · Browser preview: no shell events'
+    }
+  </script>
+</body>
+</html>

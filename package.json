@@ -1,0 +1,24 @@
+{
+  "name": "dsh-desktop",
+  "description": "Desktop source launcher for DeepSeek Harness (macOS/Windows/Linux): syncs the latest code from GitHub, builds it, and serves the Web UI in an app window",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "tsx scripts/build.ts",
+    "dev": "pnpm exec tauri dev",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

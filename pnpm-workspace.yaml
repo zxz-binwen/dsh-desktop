@@ -1,0 +1,4 @@
+# pnpm 10+ blocks dependency install scripts until reviewed; esbuild (native
+# binary, pulled by tsx/vitest) is the only one this repo needs.
+allowBuilds:
+  esbuild: true

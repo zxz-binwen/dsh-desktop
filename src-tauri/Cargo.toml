@@ -1,0 +1,26 @@
+[package]
+name = "dsh-desktop"
+description = "DeepSeek Harness desktop source-launcher shell (macOS/Windows/Linux)"
+version = "0.1.0-rc.5"
+license = "MIT"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde_json = "1"
+
+# Unix shutdown signalling (process groups) — see main.rs.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows shutdown containment (Job Objects with kill-on-close).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+
+[profile.release]
+strip = true
