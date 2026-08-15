@@ -14,17 +14,39 @@
 
 启动器在构建时不 import 任何 harness 代码，也不冻结后端快照：同步完成后运行的永远是 GitHub `master` 上的最新内容。
 
-## 前置条件
+## 环境约束
 
 构建机与目标机相同：
 
-- Rust 工具链 —— <https://rustup.rs>（仅构建需要）
-- Node.js `^22.19.0 || >=24.0.0`
-- pnpm —— 任意较新版本，或 corepack（Node <25 自带）
-- git —— 另外按平台：
-  - **macOS**：Xcode Command Line Tools（`xcode-select --install`）；macOS 13+
-  - **Windows**：git-for-windows；带 C++ 工作负载的 Visual Studio Build Tools（node-pty 经 node-gyp 编译）
-  - **Linux**：Tauri 系统库（webkit2gtk 4.1、librsvg、patchelf —— 见 [Tauri 前置说明](https://tauri.app/start/prerequisites/)）加 C 编译器
+| 要求 | 说明 |
+|---|---|
+| Node.js `^22.19.0 || >=24.0.0` | 硬性下限。harness 仓库钉死了 pnpm 11.7，它要求 Node ≥22.13（依赖 `node:sqlite`）；启动编排器会校验 engines 范围，版本过低时明确报错拒绝启动。 |
+| pnpm | PATH 上有 `pnpm`，或者用 corepack（`corepack enable`，Node <25 自带）——corepack 会按各仓库 `packageManager` 字段钉死精确版本。 |
+| git | 任意较新版本；启动器靠它克隆与同步。 |
+| Rust 工具链 | <https://rustup.rs> —— 仅构建时需要；运行打包好的 app 不需要。 |
+
+另外按平台：
+
+- **macOS**：Xcode Command Line Tools（`xcode-select --install`）；macOS 13+
+- **Windows**：git-for-windows；带 C++ 工作负载的 Visual Studio Build Tools（node-pty 经 node-gyp 编译）
+- **Linux**：Tauri 系统库（webkit2gtk 4.1、librsvg、patchelf —— 见 [Tauri 前置说明](https://tauri.app/start/prerequisites/)）加 C 编译器
+
+两个最常见的坑的快速自检：
+
+```sh
+node -v          # 必须是 v22.19+ 或 v24+（v20/v21 一律不行）
+pnpm -v          # 或：corepack pnpm -v
+```
+
+没有全局 pnpm、默认 Node 又偏旧的 nvm 用户通常需要：
+
+```sh
+nvm alias default 24   # 抬高默认版本；钉死的 pnpm 在 Node 20 上跑不起来
+nvm use 24             # 当前 shell 立即生效
+corepack enable        # 生成 pnpm shim；每装一个新 Node 版本后需重跑一次
+```
+
+打包好的 app 本身**不需要**全局 `pnpm` —— 壳会把常见 node 安装根前置到 PATH，编排器会回退到 corepack 并自建 shim —— 但机器上的 `node` 必须满足上述版本范围，因为 app 运行的一切都通过 `node` 拉起。
 
 ## 构建（在目标平台上）
 

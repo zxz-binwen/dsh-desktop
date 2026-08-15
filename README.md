@@ -18,13 +18,35 @@ The launcher never imports harness code at build time and never freezes a backen
 
 Build machine and target machine alike:
 
-- Rust toolchain — <https://rustup.rs> (build only)
-- Node.js `^22.19.0 || >=24.0.0`
-- pnpm — any recent version, or corepack (ships with Node <25)
-- git — plus, per platform:
-  - **macOS**: Xcode Command Line Tools (`xcode-select --install`); macOS 13+
-  - **Windows**: git-for-windows; Visual Studio Build Tools with the C++ workload (node-pty compiles via node-gyp)
-  - **Linux**: the Tauri system libraries (webkit2gtk 4.1, librsvg, patchelf — see the [Tauri prerequisites](https://tauri.app/start/prerequisites/)) plus a C compiler
+| Requirement | Detail |
+|---|---|
+| Node.js `^22.19.0 || >=24.0.0` | Hard floor. The harness repository pins pnpm 11.7, which requires Node ≥22.13 (`node:sqlite`); the boot orchestrator checks the engines range and fails loudly on older versions. |
+| pnpm | Either a `pnpm` on PATH, or corepack (`corepack enable`), which ships with Node <25 and pins the exact version from each repository's `packageManager` field. |
+| git | Any recent version; the launcher clones and syncs through it. |
+| Rust toolchain | <https://rustup.rs> — build only; not needed to run a packaged app. |
+
+Per platform additionally:
+
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`); macOS 13+
+- **Windows**: git-for-windows; Visual Studio Build Tools with the C++ workload (node-pty compiles via node-gyp)
+- **Linux**: the Tauri system libraries (webkit2gtk 4.1, librsvg, patchelf — see the [Tauri prerequisites](https://tauri.app/start/prerequisites/)) plus a C compiler
+
+Quick check of the two most common gaps:
+
+```sh
+node -v          # must print v22.19+ or v24+ (a bare v20/v21 will NOT work)
+pnpm -v          # or: corepack pnpm -v
+```
+
+nvm users with no global pnpm and an older default Node typically need:
+
+```sh
+nvm alias default 24   # raise the default; the pinned pnpm cannot run on Node 20
+nvm use 24             # take effect in the current shell
+corepack enable        # creates the pnpm shim; re-run after installing a new Node version
+```
+
+The packaged app itself does **not** need a global `pnpm` — the shell augments PATH with common node roots and the orchestrator falls back to corepack, creating its own shims — but the machine's `node` must satisfy the range above, because the app spawns `node` for everything it runs.
 
 ## Build (on the target platform)
 
