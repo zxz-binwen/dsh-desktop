@@ -1,5 +1,7 @@
 # dsh-desktop
 
+English | [中文](README.zh.md)
+
 Desktop source launcher for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — macOS, Windows, and Linux.
 
 A desktop app that always runs the latest source: on every launch the bundled orchestrator syncs a dedicated clone of the harness repository from GitHub, rebuilds it when HEAD moved, then starts `dsh web` and shows the Web UI in the app window. Design and decisions: [docs/design.md](docs/design.md).
