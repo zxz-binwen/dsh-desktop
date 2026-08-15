@@ -16,6 +16,10 @@
  *
  * Nothing else may write to stdout. All child output is forwarded as log
  * events (before readiness) and appended to logs/backend.log (always).
+ *
+ * Frozen bundles set DSH_FROZEN_ROOT (the app's frozen/ resources directory
+ * holding a prebuilt repository and the node runtime): the backend starts
+ * directly from it with no git, pnpm, or network contact at all.
  */
 
 import { spawn } from 'node:child_process'
@@ -95,12 +99,38 @@ export function needsBuild({ head, stamp, binExists }) {
 }
 
 /**
+ * Pick an actionable hint when a clone failed because of the network rather
+ * than because of the repository or the URL itself: the first launch cannot
+ * proceed offline, so the splash should say so instead of showing raw git
+ * output.
+ * @param {string[]} tail retained output tail of the failed clone
+ * @returns {string | undefined} the network hint, or undefined for other failures
+ */
+export function cloneFailureHint(tail) {
+  const markers = [
+    'unable to access',
+    'could not resolve host',
+    'could not resolve proxy',
+    'failed to connect',
+    'network is unreachable',
+    'operation timed out',
+    'connection timed out',
+    'connection refused',
+  ]
+  const output = tail.join('\n').toLowerCase()
+  return markers.some((marker) => output.includes(marker))
+    ? 'Check your internet connection — the first launch must reach GitHub'
+    : undefined
+}
+
+/**
  * Merge user configuration over the defaults and derive all state paths.
  * Performs no I/O; every invalid shape throws with the offending key named.
  * `nodeDir` (a directory containing the node executable) is consumed by the
  * shell for PATH augmentation, not by this script.
  * @param {string} appDataDir absolute application data directory
- * @param {Record<string, unknown>} overrides parsed contents of `config.json`
+ * @param {unknown} overrides parsed contents of `config.json`; the function
+ *   itself rejects non-object shapes, so callers may pass anything
  * @returns {{
  *   repoUrl: string, branch: string, repoDir: string, skipSync: boolean,
  *   nodeDir: string | undefined, stampPath: string, logDir: string,
@@ -154,6 +184,12 @@ export function needsShell(platform, file) {
  * Quote one argv element for a cmd.exe invocation: with `shell: true`, Node
  * space-joins the arguments without quoting, so any argument outside the
  * plain-word allowlist must be wrapped in double quotes.
+ *
+ * Known caveat: cmd.exe still expands %VAR% inside double quotes, and a
+ * quoted argument ending in a backslash escapes the closing quote. Neither
+ * can occur today (git URLs, branches, and data paths never contain '%' or
+ * end in a backslash), so this stays a documented limitation rather than a
+ * general cmd quoting layer.
  * @param {string} arg one argv element
  * @returns {string} the cmd-safe spelling of the argument
  */
@@ -298,12 +334,97 @@ async function git(args, cwd) {
 }
 
 /**
+ * Boot the frozen bundle: the application resources carry a prebuilt
+ * repository and the node runtime (`frozen/repo`, `frozen/node`), so the
+ * backend starts immediately — no toolchain probes, no git, no network.
+ * @param {string} frozenRoot absolute path of the frozen resources directory
+ * @param {string} appDataDir application data directory (for logs)
+ */
+async function bootFrozen(frozenRoot, appDataDir) {
+  const logDir = join(appDataDir, 'logs')
+  await mkdir(logDir, { recursive: true })
+  await startBackend(join(frozenRoot, 'repo'), logDir, process.env)
+}
+
+/**
+ * Spawn the backend web server from `repoDir` and supervise it to readiness:
+ * append every output line to logs/backend.log, forward pre-readiness lines
+ * as log events, emit `ready` on the readiness URL, and turn a pre-readiness
+ * death into a failure.
+ * @param {string} repoDir repository providing apps/cli/lib/bin.js
+ * @param {string} logDir where backend.log is appended
+ * @param {NodeJS.ProcessEnv} env environment for the backend
+ */
+async function startBackend(repoDir, logDir, env) {
+  emit('phase', { phase: 'start' })
+  const backend = spawn(process.execPath, [join(repoDir, 'apps/cli/lib/bin.js'), 'web', '--host', '127.0.0.1', '--port', '0'], {
+    cwd: repoDir,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  backend.on('error', () => {})
+  currentChild = backend
+  const logPath = join(logDir, 'backend.log')
+  const logStream = createWriteStream(logPath, { flags: 'a' })
+  let ready = false
+
+  const watchdog = setTimeout(() => {
+    if (ready) return
+    backend.kill('SIGTERM')
+    fail(`the backend did not report readiness within ${String(READY_TIMEOUT_MS / 1000)}s`, `See ${logPath}`)
+  }, READY_TIMEOUT_MS)
+  watchdog.unref()
+
+  const observeBackend = (line) => {
+    if (line === '') return
+    logStream.write(`${line}\n`)
+    if (ready) return
+    const url = parseReadinessLine(line)
+    if (url !== null) {
+      ready = true
+      clearTimeout(watchdog)
+      emit('ready', { url })
+      return
+    }
+    emit('log', { line })
+  }
+  // A broken output stream must surface as a failure instead of crashing this
+  // process on an unhandled rejection; without readable output the backend
+  // cannot be supervised, so it is terminated too.
+  const drains = [readLines(backend.stdout, observeBackend), readLines(backend.stderr, observeBackend)]
+  for (const drain of drains) {
+    drain.catch((error) => {
+      backend.kill('SIGTERM')
+      fail(`backend output stream failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  const exitCode = await waitForClose(backend)
+  currentChild = null
+  logStream.end()
+  if (process.exitCode === 1) return
+  exitIfShuttingDown()
+  if (!ready) {
+    fail(`the backend exited with code ${String(exitCode)} before reporting readiness`, `See ${logPath}`)
+    return
+  }
+  emit('exited', { code: exitCode })
+  process.exitCode = exitCode < 0 ? 1 : exitCode
+}
+
+/**
  * Boot sequence: toolchain → clone/sync → install+build → backend → readiness.
  * @param {string} appDataDirArg application data directory passed by the shell
  */
 async function main(appDataDirArg) {
   const appDataDir = resolve(appDataDirArg)
   await mkdir(appDataDir, { recursive: true })
+
+  const frozenRoot = process.env.DSH_FROZEN_ROOT
+  if (frozenRoot !== undefined && frozenRoot !== '') {
+    await bootFrozen(resolve(frozenRoot), appDataDir)
+    return
+  }
 
   let overrides = {}
   const configPath = join(appDataDir, 'config.json')
@@ -332,12 +453,6 @@ async function main(appDataDirArg) {
     fail(`node ${process.version} does not satisfy the repository engines range ^22.19.0 || >=24.0.0`, 'Install Node.js 24 from https://nodejs.org')
     return
   }
-  const pnpm = await resolvePnpm()
-  if (pnpm === null) {
-    fail('pnpm is unavailable', 'Install pnpm (npm i -g pnpm) or use a Node version that ships corepack')
-    return
-  }
-
   const phase = firstPhase({ repoCloned: existsSync(join(config.repoDir, '.git')), skipSync: config.skipSync })
   if (phase === 'clone') {
     emit('phase', { phase: 'clone' })
@@ -346,12 +461,25 @@ async function main(appDataDirArg) {
       env: process.env,
     })
     if (clone.code !== 0) {
-      fail(`cloning ${config.repoUrl} (branch ${config.branch}) failed`, clone.tail.join('\n'))
+      fail(`cloning ${config.repoUrl} (branch ${config.branch}) failed`, cloneFailureHint(clone.tail) ?? clone.tail.join('\n'))
       return
     }
     exitIfShuttingDown()
   } else if (phase === 'sync') {
     emit('phase', { phase: 'sync' })
+    // The clone's origin still records the URL from clone time; a repoUrl
+    // change in config.json must retarget it or every later fetch keeps
+    // syncing the original source. Best effort: a checkout too broken to
+    // retarget fails at the fetch or the HEAD read below.
+    try {
+      const originUrl = await git(['remote', 'get-url', 'origin'], config.repoDir)
+      if (originUrl !== config.repoUrl) {
+        await git(['remote', 'set-url', 'origin', config.repoUrl], config.repoDir)
+        emit('notice', { message: `repoUrl changed; origin retargeted to ${config.repoUrl}` })
+      }
+    } catch (error) {
+      emit('notice', { message: `cannot retarget origin after a repoUrl change: ${String(error)}` })
+    }
     const fetch = await run('git', ['fetch', '--depth', '1', 'origin', config.branch], { cwd: config.repoDir, env: process.env })
     if (fetch.code !== 0) {
       exitIfShuttingDown()
@@ -366,13 +494,30 @@ async function main(appDataDirArg) {
     exitIfShuttingDown()
   }
 
-  const head = await git(['rev-parse', 'HEAD'], config.repoDir)
+  let head
+  try {
+    head = await git(['rev-parse', 'HEAD'], config.repoDir)
+  } catch (error) {
+    // A clone interrupted mid-download (the grace-window SIGKILL can land
+    // during the first clone) can leave a checkout whose HEAD never resolves;
+    // every later launch would fail here without the re-clone hint.
+    fail(`cannot resolve HEAD in the managed checkout: ${String(error)}`, `Delete ${config.repoDir} and relaunch to re-clone`)
+    return
+  }
   exitIfShuttingDown()
   const binPath = join(config.repoDir, 'apps/cli/lib/bin.js')
   const stamp = existsSync(config.stampPath) ? (await readFile(config.stampPath, 'utf8')).trim() : undefined
-  /** Environment for every child after the toolchain phase; CI=1 keeps pnpm from installing git hooks and emitting TTY progress bars. */
-  let childEnv = { ...process.env, CI: '1' }
+  /** Child environment shared by the pnpm phases and the backend; only the shim-PATH augmentation below ever changes it. */
+  let childEnv = { ...process.env }
   if (needsBuild({ head, stamp, binExists: existsSync(binPath) })) {
+    // Resolve pnpm only now: a launch whose stamp already matches HEAD (the
+    // common fast path) never pays the corepack/pnpm probes — the corepack
+    // probe can download pnpm on first use and adds seconds to every start.
+    const pnpm = await resolvePnpm()
+    if (pnpm === null) {
+      fail('pnpm is unavailable', 'Install pnpm (npm i -g pnpm) or use a Node version that ships corepack')
+      return
+    }
     // The repository's own build scripts invoke bare `pnpm` (build:web), but a
     // node installation without enabled corepack shims has no `pnpm` on PATH.
     // Create shims once per data directory and put them ahead of PATH.
@@ -386,15 +531,21 @@ async function main(appDataDirArg) {
       }
       childEnv = { ...childEnv, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', PATH: `${shimDir}${delimiter}${childEnv.PATH ?? ''}` }
     }
+    /**
+     * pnpm-only environment: CI=1 keeps pnpm from installing git hooks and
+     * emitting TTY progress bars. The backend must not inherit it — the
+     * harness would see a CI runtime it did not opt into.
+     */
+    const pnpmEnv = { ...childEnv, CI: '1' }
     emit('phase', { phase: 'install' })
-    const install = await run(pnpm.file, [...pnpm.prefix, 'install', '--frozen-lockfile'], { cwd: config.repoDir, env: childEnv })
+    const install = await run(pnpm.file, [...pnpm.prefix, 'install', '--frozen-lockfile'], { cwd: config.repoDir, env: pnpmEnv })
     if (install.code !== 0) {
       fail('pnpm install failed', install.tail.join('\n'))
       return
     }
     exitIfShuttingDown()
     emit('phase', { phase: 'build' })
-    const build = await run(pnpm.file, [...pnpm.prefix, 'run', 'build'], { cwd: config.repoDir, env: childEnv })
+    const build = await run(pnpm.file, [...pnpm.prefix, 'run', 'build'], { cwd: config.repoDir, env: pnpmEnv })
     if (build.code !== 0) {
       fail('pnpm run build failed', build.tail.join('\n'))
       return
@@ -404,52 +555,7 @@ async function main(appDataDirArg) {
   }
   exitIfShuttingDown()
 
-  emit('phase', { phase: 'start' })
-  const backend = spawn(process.execPath, ['apps/cli/lib/bin.js', 'web', '--host', '127.0.0.1', '--port', '0'], {
-    cwd: config.repoDir,
-    env: childEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  backend.on('error', () => {})
-  currentChild = backend
-  const logPath = join(config.logDir, 'backend.log')
-  const logStream = createWriteStream(logPath, { flags: 'a' })
-  let ready = false
-
-  const watchdog = setTimeout(() => {
-    if (ready) return
-    backend.kill('SIGTERM')
-    fail(`the backend did not report readiness within ${String(READY_TIMEOUT_MS / 1000)}s`, `See ${logPath}`)
-  }, READY_TIMEOUT_MS)
-  watchdog.unref()
-
-  const observeBackend = (line) => {
-    if (line === '') return
-    logStream.write(`${line}\n`)
-    if (ready) return
-    const url = parseReadinessLine(line)
-    if (url !== null) {
-      ready = true
-      clearTimeout(watchdog)
-      emit('ready', { url })
-      return
-    }
-    emit('log', { line })
-  }
-  void readLines(backend.stdout, observeBackend)
-  void readLines(backend.stderr, observeBackend)
-
-  const exitCode = await waitForClose(backend)
-  currentChild = null
-  logStream.end()
-  if (process.exitCode === 1) return
-  exitIfShuttingDown()
-  if (!ready) {
-    fail(`the backend exited with code ${String(exitCode)} before reporting readiness`, `See ${logPath}`)
-    return
-  }
-  emit('exited', { code: exitCode })
-  process.exitCode = exitCode < 0 ? 1 : exitCode
+  await startBackend(config.repoDir, config.logDir, childEnv)
 }
 
 /**

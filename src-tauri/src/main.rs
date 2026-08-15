@@ -14,7 +14,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -63,6 +63,15 @@ unsafe impl Send for JobHandle {}
 #[derive(Default)]
 struct ShellState {
     boot: Mutex<Option<BootProcess>>,
+    /// Held for the whole retry sequence (drain + respawn): a click arriving
+    /// while a sequence runs is covered by that sequence's respawn, so it
+    /// coalesces instead of interleaving a second shutdown and spawn and
+    /// leaking a boot tree between them.
+    restart: Mutex<()>,
+    /// Increments on every spawn; a stdout reader compares it at EOF so an
+    /// orchestrator that a retry replaced cannot report a failure against
+    /// its successor.
+    boot_generation: AtomicU64,
     /// Set once the window navigated to the backend URL: the splash is gone by
     /// then, so log events are dropped and failures switch to a native dialog.
     ready: AtomicBool,
@@ -113,6 +122,7 @@ fn spawn_boot(app: &AppHandle) {
     let state = app.state::<ShellState>();
     state.failed.store(false, Ordering::SeqCst);
     state.shutting_down.store(false, Ordering::SeqCst);
+    let generation = state.boot_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let data_dir = match app.path().app_data_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -124,14 +134,43 @@ fn spawn_boot(app: &AppHandle) {
         emit_error(app, format!("cannot create the application data directory: {error}"), None);
         return;
     }
-    let boot_script = app.path().resource_dir().expect("resources resolve beside the app").join("boot.mjs");
+    let resources = app.path().resource_dir().expect("resources resolve beside the app");
+    let boot_script = resources.join("boot.mjs");
 
-    let mut command = Command::new("node");
+    // Frozen bundles carry a prebuilt repository and the node runtime under
+    // frozen/ (see scripts/build.ts --frozen): the orchestrator boots the
+    // backend directly from them — no git, pnpm, or network — and the bundled
+    // node replaces PATH discovery entirely.
+    let frozen_root = resources.join("frozen");
+    let frozen = bundled_node(&frozen_root).exists();
+    if frozen {
+        // The splash footer otherwise promises a git sync that never happens.
+        emit_event(app, &json!({ "type": "mode", "mode": "frozen" }));
+    }
+
+    let mut command = Command::new(if frozen {
+        bundled_node(&frozen_root)
+    } else {
+        std::path::PathBuf::from("node")
+    });
     command
         .arg(&boot_script)
         .arg(&data_dir)
-        .current_dir(&data_dir)
-        .env("PATH", augmented_path(&data_dir))
+        .current_dir(&data_dir);
+    if frozen {
+        // Prepend the bundled node's bin dir so anything the backend tree
+        // re-spawns resolves the same runtime, and point the orchestrator at
+        // the frozen payload.
+        let node_bin_dir = frozen_root.join("node/bin");
+        let separator = if cfg!(windows) { ";" } else { ":" };
+        let existing = std::env::var_os("PATH").unwrap_or_default().to_string_lossy().into_owned();
+        command
+            .env("DSH_FROZEN_ROOT", &frozen_root)
+            .env("PATH", format!("{}{separator}{existing}", node_bin_dir.display()));
+    } else {
+        command.env("PATH", augmented_path(&data_dir));
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -169,9 +208,12 @@ fn spawn_boot(app: &AppHandle) {
             }
             // The orchestrator died without readiness and without reporting a
             // failure: surface a generic error so the splash always ends on a
-            // retry affordance instead of hanging on the current phase.
+            // retry affordance instead of hanging on the current phase. A
+            // generation mismatch means a retry already replaced this
+            // orchestrator, so its death is not news.
             let state = app.state::<ShellState>();
-            if !state.ready.load(Ordering::SeqCst)
+            if generation == state.boot_generation.load(Ordering::SeqCst)
+                && !state.ready.load(Ordering::SeqCst)
                 && !state.failed.load(Ordering::SeqCst)
                 && !state.shutting_down.load(Ordering::SeqCst)
             {
@@ -197,12 +239,19 @@ fn spawn_boot(app: &AppHandle) {
     *state.boot.lock().unwrap() = Some(BootProcess { child, containment });
 }
 
-/// Splash retry: drain the previous boot tree, then start a fresh one.
+/// Splash retry: drain the previous boot tree, then start a fresh one. Runs on
+/// its own thread because a synchronous command executes on the main thread,
+/// where the drain (up to the full shutdown grace) would freeze the UI — the
+/// exact scenario a retry click heralds.
 #[tauri::command]
 fn restart_boot(app: AppHandle) {
-    shutdown_boot(&app);
-    app.state::<ShellState>().ready.store(false, Ordering::SeqCst);
-    spawn_boot(&app);
+    thread::spawn(move || {
+        let state = app.state::<ShellState>();
+        let Ok(_restart) = state.restart.try_lock() else { return };
+        shutdown_boot(&app);
+        state.ready.store(false, Ordering::SeqCst);
+        spawn_boot(&app);
+    });
 }
 
 /// The splash invokes this once its event listener is attached; the first boot
@@ -293,6 +342,17 @@ fn assign_kill_on_close_job(child: &Child) -> Result<JobHandle, String> {
     }
 }
 
+/// Path of the node binary inside the frozen resources. The macOS/Linux node
+/// distribution keeps it under bin/, the Windows distribution at the archive
+/// root.
+fn bundled_node(frozen_root: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(windows) {
+        frozen_root.join("node").join("node.exe")
+    } else {
+        frozen_root.join("node").join("bin").join("node")
+    }
+}
+
 /// A GUI process inherits a minimal PATH that never contains the user's node
 /// installation (nvm, homebrew, Program Files, version managers). Collect the
 /// common node roots for the platform ahead of that PATH so `node`,
@@ -368,7 +428,30 @@ fn collect_platform_node_roots(prefixes: &mut Vec<std::path::PathBuf>) {
         prefixes.push(home.join(r"scoop\shims"));
     }
     if let Some(dir) = std::env::var_os("APPDATA") {
-        prefixes.push(std::path::PathBuf::from(dir).join("nvm"));
+        // nvm-windows keeps each version under %APPDATA%\nvm\vX.Y.Z\ (no
+        // node.exe directly under nvm itself), so scan for the newest
+        // installed version, mirroring the Unix nvm scan above.
+        let nvm_dir = std::path::PathBuf::from(dir).join("nvm");
+        let mut newest: Option<(Vec<u64>, std::path::PathBuf)> = None;
+        if let Ok(entries) = fs::read_dir(&nvm_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(rest) = name.strip_prefix('v') else { continue };
+                let version: Vec<u64> = rest.split('.').filter_map(|part| part.parse().ok()).collect();
+                if version.len() != 3 {
+                    continue;
+                }
+                let candidate = entry.path();
+                if candidate.join("node.exe").exists()
+                    && newest.as_ref().is_none_or(|(best, _)| version > *best)
+                {
+                    newest = Some((version, candidate));
+                }
+            }
+        }
+        if let Some((_, dir)) = newest {
+            prefixes.push(dir);
+        }
     }
 }
 

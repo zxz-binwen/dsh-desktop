@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../boot.mjs": "boot.mjs",
+      "../dist-frozen/node/": "frozen/node/",
+      "../dist-frozen/manifest.json": "frozen/manifest.json"
+    }
+  }
+}

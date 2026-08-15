@@ -12,7 +12,7 @@ A desktop app that always runs the latest source: on every launch the bundled or
 - `splash/` — the window's initial page: boot phases, a log tail, and a retry button.
 - `src-tauri/` — the Rust/Tauri 2 shell: spawns `node boot.mjs <app-data-dir>`, forwards events to the splash, navigates to the backend URL on readiness, and terminates the whole boot tree on quit — via a Unix process group (SIGTERM → SIGKILL after the 5.5 s grace) or, on Windows, a Job Object with kill-on-job-close.
 
-The launcher never imports harness code at build time and never freezes a backend snapshot: whatever `master` holds on GitHub is what runs after the sync settles.
+The launcher never imports harness code at build time and never freezes a backend snapshot: whatever `master` holds on GitHub is what runs after the sync settles. A second, *frozen* distribution flavor that ships a prebuilt backend and the node runtime in the bundle exists for direct-use distribution — see [Standalone macOS build](#standalone-macos-build-frozen).
 
 ## Prerequisites
 
@@ -63,6 +63,21 @@ The script rasterizes `assets/favicon.svg` into a 1024px source PNG and runs `ta
 
 Shell development with live rebuild: `pnpm run dev` (the splash boots the real orchestrator against real app data).
 
+### Standalone macOS build (`--frozen`)
+
+```sh
+pnpm run build --frozen       # options: --node-version v24.19.0 --harness-ref master
+```
+
+The frozen flavor ships the harness *and* a Node runtime inside the bundle: it opens directly, contacts no network, and requires nothing installed on the machine (no git, pnpm, or Node). The build clones the harness, installs and builds the full dependency graph (the harness resolves some imports through cross-package hoisting, so pruning to prod deps breaks it), copies the tree with every symlink resolved (Tauri's resource packer drops links), strips source maps and build caches, and adds an official node binary (SHA-256 verified) into the app's `frozen/` resources. At startup the shell detects `frozen/`, boots the backend with the bundled node, and the splash says so. Output: `dist-app/DeepSeek-Harness-<version>-macos-<arch>-standalone.zip`, ready to attach to a GitHub Release (`gh release create ... --draft`). Updating a frozen install means shipping a new zip — it never self-updates.
+
+## Development
+
+```sh
+pnpm test        # boot orchestrator tests (unit + end-to-end with a fake toolchain)
+pnpm typecheck   # type-check the build script and tests
+```
+
 ## Per-user state
 
 - macOS: `~/Library/Application Support/com.deepseek-ai.dsh-desktop/`
@@ -91,7 +106,8 @@ Sessions, profiles, and settings are NOT stored there: the backend uses the ordi
 
 ## Behavior notes
 
-- Offline launch: a failed `git fetch` logs a notice and continues with the existing checkout.
+- Offline launch: a failed `git fetch` logs a notice and continues with the existing checkout. Only the first launch needs network — with no existing clone, a failed `git clone` aborts with a network hint.
+- A changed `repoUrl` in `config.json` retargets the existing clone's `origin` on the next launch (logged as a notice); switching sources does not require deleting `repo/`. A checkout whose HEAD no longer resolves (an interrupted first clone) fails with a delete-and-reclone hint.
 - First launch clones and builds, so it takes minutes; later launches are fast when HEAD did not move.
 - The port is OS-assigned (`--port 0`); the window navigates to whatever URL the backend reports.
 - Closing the window terminates the whole backend tree; a second instance focuses the existing window.

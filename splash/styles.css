@@ -1,0 +1,104 @@
+/* Splash page for the DeepSeek Harness desktop launcher. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0e14;
+  --panel: #121722;
+  --text: #e6e8ee;
+  --muted: #8b93a7;
+  --accent: #4f6ef7;
+  --ok: #3ecf8e;
+  --err: #f6685e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.6 ui-sans-serif, -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+header {
+  padding: 44px 32px 8px;
+  text-align: center;
+}
+header h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 32px 28px;
+  min-height: 0;
+}
+#steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.step {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--muted);
+}
+.step.active { color: var(--text); }
+.step.done { color: var(--text); }
+.step .mark { width: 1.2em; text-align: center; flex: none; }
+.step.active .mark { animation: pulse 1.1s ease-in-out infinite; }
+.step.error { color: var(--err); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+#error {
+  display: none;
+  border: 1px solid var(--err);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+  white-space: pre-wrap;
+  user-select: text;
+}
+#error .hint { color: var(--muted); margin-top: 6px; font-size: 12px; }
+#retry {
+  align-self: center;
+  margin-top: 4px;
+  padding: 6px 22px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+#log {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 10px 12px;
+  overflow-y: auto;
+  background: var(--panel);
+  border-radius: 8px;
+  color: var(--muted);
+  font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+footer {
+  padding: 0 32px 18px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}

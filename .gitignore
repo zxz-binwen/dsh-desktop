@@ -1,5 +1,7 @@
 node_modules/
 dist-app/
+dist-frozen/
+.harness-build/
 src-tauri/target/
 src-tauri/gen/
 .DS_Store

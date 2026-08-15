@@ -10,7 +10,7 @@ Users want a double-clickable desktop app for the DeepSeek Harness Web UI, and t
 
 ### Launcher over frozen bundle
 
-The app ships no backend. `boot.mjs` (zero-dependency plain Node, because it must bootstrap a not-yet-installed clone) manages a dedicated shallow clone under the app data directory: `git clone --depth 1` on first launch, `git fetch --depth 1` + `git reset --hard FETCH_HEAD` after. When HEAD moved (tracked by a `build-stamp` file) it runs `pnpm install --frozen-lockfile && pnpm run build`, then spawns `node apps/cli/lib/bin.js web --host 127.0.0.1 --port 0`. The clone is app-owned and reset hard; the README and config validation keep users from pointing `repoDir` at a working checkout. A failed fetch logs a notice and continues offline; only `git reset` failing is fatal (corrupt checkout → delete and re-clone).
+The app ships no backend. `boot.mjs` (zero-dependency plain Node, because it must bootstrap a not-yet-installed clone) manages a dedicated shallow clone under the app data directory: `git clone --depth 1` on first launch, `git fetch --depth 1` + `git reset --hard FETCH_HEAD` after (a changed `repoUrl` in config.json retargets `origin` before the fetch, and a checkout whose HEAD no longer resolves — the interrupted-clone case — fails with the delete-and-reclone hint instead of a bare error). When HEAD moved (tracked by a `build-stamp` file) it runs `pnpm install --frozen-lockfile && pnpm run build`, then spawns `node apps/cli/lib/bin.js web --host 127.0.0.1 --port 0`. The clone is app-owned and reset hard; the README and config validation keep users from pointing `repoDir` at a working checkout. A failed fetch logs a notice and continues offline; only `git reset` failing is fatal (corrupt checkout → delete and re-clone).
 
 ### Tauri shell with a TypeScript orchestrator
 
@@ -29,6 +29,10 @@ Two properties of a desktop-launched process shaped the shell. First, it inherit
 ### Packaging
 
 `scripts/build.ts` rasterizes `assets/favicon.svg` via `@resvg/resvg-js` into a 1024px source PNG and runs `tauri icon` (every platform's icon set in one command), then `tauri build` with per-platform config overlays (`tauri.{macos,windows,linux}.conf.json` select .app / NSIS / deb+AppImage) and copies whatever was produced into `dist-app/`. This repository is intentionally standalone: the launcher never imports harness code at build time and needs no lockstep versioning with the harness — it was extracted from a harness monorepo checkout on 2026-08-15 precisely because every integration point there was escape-hatch wiring around product gates.
+
+### Frozen distribution
+
+For direct-use distribution the same shell ships as a second flavor (`scripts/build.ts --frozen`, macOS first): the harness is cloned and built with its full dependency graph (it resolves some imports through cross-package hoisting, so a prod-only prune breaks runtime resolution), the tree is copied with every symlink resolved into a plain file tree (Tauri's resource packer drops links; pnpm's workspace links are sometimes build-machine-absolute), source maps and build caches are stripped, and an official node binary (SHA-256 verified) is frozen into the app's `frozen/` resources. At startup the shell detects `frozen/`, spawns the orchestrator with the bundled node (`DSH_FROZEN_ROOT` points `boot.mjs` at the payload), and the backend starts with zero git/pnpm/network contact; the splash footer is switched to say so via a `mode` event. The tradeoff is explicit: a frozen build never updates itself — shipping a new zip is the upgrade path — and the source launcher remains the always-fresh flavor.
 
 ## Disposition
 

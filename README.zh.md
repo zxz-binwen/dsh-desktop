@@ -12,7 +12,7 @@
 - `splash/` —— 窗口的初始页面：启动阶段、日志尾部、重试按钮。
 - `src-tauri/` —— Rust/Tauri 2 壳：以独立容器拉起 `node boot.mjs <应用数据目录>`，把事件转发给 splash，就绪后导航到后端 URL，退出时终止整棵 boot 进程树 —— Unix 上用进程组（SIGTERM → 5.5 秒宽限 → SIGKILL），Windows 上用设了 kill-on-close 的 Job Object。
 
-启动器在构建时不 import 任何 harness 代码，也不冻结后端快照：同步完成后运行的永远是 GitHub `master` 上的最新内容。
+启动器在构建时不 import 任何 harness 代码，也不冻结后端快照：同步完成后运行的永远是 GitHub `master` 上的最新内容。另有一种面向直接分发、内置预构建后端与 node 运行时的**冻结**分发包，见 [macOS 独立包](#macos-独立包frozen)。
 
 ## 环境约束
 
@@ -63,6 +63,21 @@ pnpm run build          # 或：pnpm exec tsx scripts/build.ts --icon
 
 壳的开发模式（实时重建）：`pnpm run dev`（splash 会以真实应用数据启动真实编排器）。
 
+### macOS 独立包（`--frozen`）
+
+```sh
+pnpm run build --frozen       # 可选：--node-version v24.19.0 --harness-ref master
+```
+
+独立（冻结）包把 harness **和** Node 运行时一起打进安装包：打开即用、不联网、目标机器无需安装任何东西（不需要 git、pnpm、Node）。构建时克隆 harness，安装并构建**完整依赖图**（harness 有跨包提升解析的导入，裁剪到生产依赖会破坏运行时解析），以**解析全部符号链接**的方式拷贝目录树（Tauri 资源打包会丢弃链接），剥离 source map 与构建缓存控制体积，连同官方 node 二进制（SHA-256 校验）冻结进 app 的 `frozen/` 资源。启动时壳检测到 `frozen/` 就用内置 node 直接拉起后端，splash 也会注明。产物：`dist-app/DeepSeek-Harness-<版本>-macos-<架构>-standalone.zip`，可直接附到 GitHub Release（`gh release create ... --draft`）。冻结包不会自更新——升级即发布新的 zip。
+
+## 开发
+
+```sh
+pnpm test        # boot 编排器测试（单元 + 假工具链端到端）
+pnpm typecheck   # 类型检查构建脚本与测试
+```
+
 ## 每用户数据
 
 - macOS：`~/Library/Application Support/com.deepseek-ai.dsh-desktop/`
@@ -91,7 +106,8 @@ pnpm run build          # 或：pnpm exec tsx scripts/build.ts --icon
 
 ## 行为说明
 
-- 离线启动：`git fetch` 失败时记录一条通知并继续使用现有检出。
+- 离线启动：`git fetch` 失败时记录一条通知并继续使用现有检出。只有首次启动需要网络——没有现有克隆时，失败的 `git clone` 会中止并给出网络提示。
+- 在 `config.json` 中更改 `repoUrl` 后，下次启动会把现有克隆的 `origin` 重定向到新地址（记录一条通知）；切换来源无需删除 `repo/`。HEAD 无法解析的检出（首启克隆被中断）会失败并给出“删除后重克隆”的提示。
 - 首次启动需要克隆和构建，耗时数分钟；之后 HEAD 没变时启动很快。
 - 端口由操作系统分配（`--port 0`）；窗口导航到后端报告的任意 URL。
 - 关窗即终止整棵后端进程树；二次启动实例会聚焦已有窗口。

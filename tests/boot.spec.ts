@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_BRANCH,
   DEFAULT_REPO_URL,
+  cloneFailureHint,
   firstPhase,
   needsBuild,
   needsShell,
@@ -94,6 +95,21 @@ describe('quoteCmdArg', () => {
     expect(quoteCmdArg('C:\\Users\\John Doe\\AppData\\Roaming\\x')).toBe('"C:\\Users\\John Doe\\AppData\\Roaming\\x"')
     expect(quoteCmdArg('https://example.com/repo.git?a b')).toBe('"https://example.com/repo.git?a b"')
     expect(quoteCmdArg('two words')).toBe('"two words"')
+  })
+})
+
+describe('cloneFailureHint', () => {
+  it('suggests a network problem for common git network failure output', () => {
+    expect(cloneFailureHint(['fatal: unable to access', 'https://github.com/deepseek-ai/deepseek-harness.git/'])).toMatch(/internet connection/u)
+    expect(cloneFailureHint(['fatal: Could not resolve host: github.com'])).toMatch(/internet connection/u)
+    expect(cloneFailureHint(['fatal: Failed to connect to github.com port 443: Connection refused'])).toMatch(/internet connection/u)
+    expect(cloneFailureHint(['fatal: unable to access', 'Failed to connect', 'network is unreachable'])).toMatch(/internet connection/u)
+  })
+
+  it('returns undefined for non-network failures and empty output', () => {
+    expect(cloneFailureHint(['fatal: repository not found'])).toBeUndefined()
+    expect(cloneFailureHint(['fatal: could not read Username for https://github.com: terminal prompts disabled'])).toBeUndefined()
+    expect(cloneFailureHint([])).toBeUndefined()
   })
 })
 

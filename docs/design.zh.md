@@ -10,7 +10,7 @@
 
 ### 启动器优先于冻结包
 
-app 不内嵌任何后端。`boot.mjs`（零依赖的纯 Node 脚本，因为它必须能引导一个尚未安装的克隆）在应用数据目录下管理一份专用浅克隆：首次启动 `git clone --depth 1`，之后 `git fetch --depth 1` + `git reset --hard FETCH_HEAD`。HEAD 移动时（由 `build-stamp` 文件跟踪）执行 `pnpm install --frozen-lockfile && pnpm run build`，然后拉起 `node apps/cli/lib/bin.js web --host 127.0.0.1 --port 0`。克隆为应用所有并被硬重置；因此配置校验与 README 共同阻止用户把 `repoDir` 指向自己的工作区。fetch 失败只记录通知并离线继续；仅 `git reset` 失败视为致命（检出损坏 → 删除后重新克隆）。
+app 不内嵌任何后端。`boot.mjs`（零依赖的纯 Node 脚本，因为它必须能引导一个尚未安装的克隆）在应用数据目录下管理一份专用浅克隆：首次启动 `git clone --depth 1`，之后 `git fetch --depth 1` + `git reset --hard FETCH_HEAD`（`config.json` 里的 `repoUrl` 变更会在 fetch 前重定向 `origin`；HEAD 无法解析的检出——即克隆被中断的情形——会带“删除后重克隆”提示报错，而非裸错误）。HEAD 移动时（由 `build-stamp` 文件跟踪）执行 `pnpm install --frozen-lockfile && pnpm run build`，然后拉起 `node apps/cli/lib/bin.js web --host 127.0.0.1 --port 0`。克隆为应用所有并被硬重置；因此配置校验与 README 共同阻止用户把 `repoDir` 指向自己的工作区。fetch 失败只记录通知并离线继续；仅 `git reset` 失败视为致命（检出损坏 → 删除后重新克隆）。
 
 ### Tauri 壳 + TypeScript 编排器
 
@@ -29,6 +29,10 @@ Web UI 零改动：客户端从 `window.location` 推导全部 HTTP/WebSocket/�
 ### 打包
 
 `scripts/build.ts` 用 `@resvg/resvg-js` 把 `assets/favicon.svg` 栅格化为 1024px 源图并执行 `tauri icon`（一条命令产出全平台图标集），随后 `tauri build` 按平台 overlay（`tauri.{macos,windows,linux}.conf.json` 分别选择 .app / NSIS / deb+AppImage）并把产物拷贝到 `dist-app/`。本仓库有意保持独立：启动器在构建时不 import 任何 harness 代码，也不需要与 harness 锁步版本——2026-08-15 它从一个 harness monorepo 检出中被抽出，正是因为那边所有集成点都是绕过产品门禁的接线。
+
+### 冻结分发
+
+面向直接分发，同一个壳还有第二种形态（`scripts/build.ts --frozen`，先做 macOS）：克隆 harness 并以**完整依赖图**安装构建（它有跨包提升解析的导入，裁剪到生产依赖会破坏运行时解析），把目录树以**解析全部符号链接**的普通文件树形式拷出（Tauri 资源打包会丢弃链接；pnpm 的工作区链接有时是构建机绝对路径），剥离 source map 与构建缓存，与官方 node 二进制（SHA-256 校验）一起冻结进 app 的 `frozen/` 资源。启动时壳检测到 `frozen/` 就用内置 node 拉起编排器（`DSH_FROZEN_ROOT` 指向 `boot.mjs` 所需载荷），后端零 git/pnpm/网络直接启动；splash 的 footer 通过一个 `mode` 事件改写说明。取舍是明确的：冻结包不自更新——发布新 zip 即升级——源码启动器仍是"永远最新"的形态。
 
 ## 处置
 
